@@ -47,8 +47,14 @@ resource "aws_wafv2_web_acl" "main" {
     dynamic "override_action" {
       for_each = [local.rule_modes.AmazonIpReputationList]
       content {
-        dynamic "none"  { for_each = override_action.value == "block" ? [1] : []; content {} }
-        dynamic "count" { for_each = override_action.value == "count" ? [1] : []; content {} }
+        dynamic "none" {
+          for_each = override_action.value == "block" ? [1] : []
+          content {}
+        }
+        dynamic "count" {
+          for_each = override_action.value == "count" ? [1] : []
+          content {}
+        }
       }
     }
 
@@ -79,8 +85,14 @@ resource "aws_wafv2_web_acl" "main" {
     dynamic "override_action" {
       for_each = [local.rule_modes.AnonymousIpList]
       content {
-        dynamic "none"  { for_each = override_action.value == "block" ? [1] : []; content {} }
-        dynamic "count" { for_each = override_action.value == "count" ? [1] : []; content {} }
+        dynamic "none" {
+          for_each = override_action.value == "block" ? [1] : []
+          content {}
+        }
+        dynamic "count" {
+          for_each = override_action.value == "count" ? [1] : []
+          content {}
+        }
       }
     }
 
@@ -110,8 +122,14 @@ resource "aws_wafv2_web_acl" "main" {
     dynamic "override_action" {
       for_each = [local.rule_modes.KnownBadInputsRuleSet]
       content {
-        dynamic "none"  { for_each = override_action.value == "block" ? [1] : []; content {} }
-        dynamic "count" { for_each = override_action.value == "count" ? [1] : []; content {} }
+        dynamic "none" {
+          for_each = override_action.value == "block" ? [1] : []
+          content {}
+        }
+        dynamic "count" {
+          for_each = override_action.value == "count" ? [1] : []
+          content {}
+        }
       }
     }
 
@@ -143,8 +161,14 @@ resource "aws_wafv2_web_acl" "main" {
     dynamic "override_action" {
       for_each = [local.rule_modes.CommonRuleSet]
       content {
-        dynamic "none"  { for_each = override_action.value == "block" ? [1] : []; content {} }
-        dynamic "count" { for_each = override_action.value == "count" ? [1] : []; content {} }
+        dynamic "none" {
+          for_each = override_action.value == "block" ? [1] : []
+          content {}
+        }
+        dynamic "count" {
+          for_each = override_action.value == "count" ? [1] : []
+          content {}
+        }
       }
     }
 
