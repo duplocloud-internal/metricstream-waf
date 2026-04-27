@@ -67,7 +67,7 @@ locals {
 ################################################################################
 
 module "kms" {
-  source               = "../../modules/kms"
+  source               = "../modules/kms"
   environment          = var.environment
   existing_kms_key_arn = var.kms_key_arn
   common_tags          = local.common_tags
@@ -78,7 +78,7 @@ module "kms" {
 ################################################################################
 
 module "logging" {
-  source      = "../../modules/logging"
+  source      = "../modules/logging"
   environment = var.environment
   kms_key_arn = module.kms.key_arn
 
@@ -98,7 +98,7 @@ module "logging" {
 ################################################################################
 
 module "ip_sets" {
-  source      = "../../modules/ip-sets"
+  source      = "../modules/ip-sets"
   environment = var.environment
 
   customer_ip_whitelists = var.customer_ip_whitelists
@@ -110,7 +110,7 @@ module "ip_sets" {
 ################################################################################
 
 module "waf" {
-  source      = "../../modules/waf"
+  source      = "../modules/waf"
   environment = var.environment
 
   customer_ip_whitelists = {
