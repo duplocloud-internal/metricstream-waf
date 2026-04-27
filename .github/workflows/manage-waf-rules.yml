@@ -1,0 +1,152 @@
+################################################################################
+# Manage WAF Rules — workflow_dispatch
+#
+# Lets operators change managed rule modes (COUNT ↔ BLOCK) and the global
+# rate limit threshold for any deployment without editing any files.
+#
+# Flow:
+#   1. Operator fills in the form in GitHub Actions UI
+#   2. This workflow updates config/deployments.yaml via config_manager.py
+#   3. Commits the change to a new branch and opens a PR
+#   4. Normal CI pipeline runs (plan + required approval for prod)
+#   5. Merge deploys the change
+################################################################################
+
+name: Manage WAF Rules
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'What to change'
+        required: true
+        type: choice
+        options:
+          - switch-rule-mode
+          - set-rate-limit
+      deployment_id:
+        description: 'Deployment ID (from config/deployments.yaml, e.g. prod-us-east-1)'
+        required: true
+      rule:
+        description: '[switch-rule-mode] Rule group to change'
+        required: false
+        type: choice
+        options:
+          - AmazonIpReputationList
+          - AnonymousIpList
+          - KnownBadInputsRuleSet
+          - CommonRuleSet
+      mode:
+        description: '[switch-rule-mode] New mode'
+        required: false
+        type: choice
+        options:
+          - count
+          - block
+      rate_limit:
+        description: '[set-rate-limit] New threshold (requests per IP per 5 min, min 100)'
+        required: false
+      reason:
+        description: 'Business reason for this change (included in PR description)'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  update-config:
+    name: Update WAF Config and Open PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Validate inputs
+        run: |
+          OP="${{ github.event.inputs.operation }}"
+          if [ "$OP" = "switch-rule-mode" ]; then
+            if [ -z "${{ github.event.inputs.rule }}" ] || [ -z "${{ github.event.inputs.mode }}" ]; then
+              echo "ERROR: switch-rule-mode requires --rule and --mode" >&2
+              exit 1
+            fi
+          elif [ "$OP" = "set-rate-limit" ]; then
+            if [ -z "${{ github.event.inputs.rate_limit }}" ]; then
+              echo "ERROR: set-rate-limit requires --rate-limit" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Apply config change
+        id: change
+        run: |
+          OP="${{ github.event.inputs.operation }}"
+          DEP="${{ github.event.inputs.deployment_id }}"
+
+          if [ "$OP" = "switch-rule-mode" ]; then
+            python3 scripts/config_manager.py set-rule-mode \
+              --deployment-id "$DEP" \
+              --rule "${{ github.event.inputs.rule }}" \
+              --mode "${{ github.event.inputs.mode }}" \
+              > config/deployments.yaml.new
+            echo "summary=Switch \`${{ github.event.inputs.rule }}\` → \`${{ github.event.inputs.mode }}\` in \`$DEP\`" >> $GITHUB_OUTPUT
+
+          elif [ "$OP" = "set-rate-limit" ]; then
+            python3 scripts/config_manager.py set-rate-limit \
+              --deployment-id "$DEP" \
+              --threshold "${{ github.event.inputs.rate_limit }}" \
+              > config/deployments.yaml.new
+            echo "summary=Set rate limit to \`${{ github.event.inputs.rate_limit }}\` req/IP/5min in \`$DEP\`" >> $GITHUB_OUTPUT
+          fi
+
+          mv config/deployments.yaml.new config/deployments.yaml
+
+      - name: Create branch and commit
+        id: commit
+        run: |
+          BRANCH="waf-config/$(echo '${{ steps.change.outputs.summary }}' | tr ' `/' '-' | tr -d '\\' | cut -c1-60)-${{ github.run_id }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add config/deployments.yaml
+          git commit -m "waf: ${{ steps.change.outputs.summary }}"
+          git push origin "$BRANCH"
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --title "WAF: ${{ steps.change.outputs.summary }}" \
+            --body "$(cat <<'EOF'
+          ## WAF Rule Configuration Change
+
+          **Deployment:** \`${{ github.event.inputs.deployment_id }}\`
+          **Operation:** ${{ github.event.inputs.operation }}
+          **Requested by:** @${{ github.actor }}
+
+          **Reason:** ${{ github.event.inputs.reason }}
+
+          ---
+
+          This PR was created automatically by the **Manage WAF Rules** workflow.
+          Review the plan output below before merging.
+
+          > ⚠️ Production deployments require Infrastructure Lead + Security Team Lead approval.
+          EOF
+          )" \
+            --head "${{ steps.commit.outputs.branch }}" \
+            --base main

@@ -1,0 +1,164 @@
+################################################################################
+# Add WAF Deployment — workflow_dispatch
+#
+# Register a new AWS account + region for WAF deployment.
+# No file editing required — fill in the form in the GitHub Actions UI.
+#
+# Prerequisites (must exist before running this workflow):
+#   - IAM role MetricStreamWAFDeploy in the target account (see docs/bootstrap.md)
+#   - GitHub OIDC trust policy configured for that role
+#
+# Flow:
+#   1. Operator fills in the form
+#   2. Workflow adds the deployment to config/deployments.yaml
+#   3. Commits to a new branch and opens a PR
+#   4. CI plans the new deployment automatically
+#   5. Merge deploys it (prod requires approval)
+################################################################################
+
+name: Add WAF Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_id:
+        description: 'Unique deployment ID — convention: {env}-{region} (e.g. prod-eu-west-1)'
+        required: true
+      account_id:
+        description: '12-digit AWS account ID'
+        required: true
+      region:
+        description: 'AWS region (e.g. us-east-1, eu-west-1, ap-southeast-1)'
+        required: true
+      environment:
+        description: 'Environment'
+        required: true
+        type: choice
+        options:
+          - prod
+          - nonprod
+      rate_limit:
+        description: 'Rate limit threshold — requests per IP per 5 min (leave empty for default: 2000 prod / 500 nonprod)'
+        required: false
+      state_bucket:
+        description: 'Terraform state S3 bucket name for this account (leave empty for default: metricstream-terraform-state-{account_id}). Only needed when onboarding a NEW account.'
+        required: false
+      state_bucket_region:
+        description: 'Region where the state bucket lives (leave empty to use the deployment region). Only needed when onboarding a NEW account.'
+        required: false
+      reason:
+        description: 'Business reason for this new deployment (included in PR description)'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  add-deployment:
+    name: Add Deployment and Open PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Validate account ID format
+        run: |
+          ACCOUNT_ID="${{ github.event.inputs.account_id }}"
+          if ! echo "$ACCOUNT_ID" | grep -qE '^[0-9]{12}$'; then
+            echo "ERROR: account_id must be exactly 12 digits, got: $ACCOUNT_ID" >&2
+            exit 1
+          fi
+
+      - name: Add deployment to config
+        run: |
+          RATE_ARG=""
+          if [ -n "${{ github.event.inputs.rate_limit }}" ]; then
+            RATE_ARG="--rate-limit ${{ github.event.inputs.rate_limit }}"
+          fi
+
+          BUCKET_ARG=""
+          if [ -n "${{ github.event.inputs.state_bucket }}" ]; then
+            BUCKET_ARG="--state-bucket ${{ github.event.inputs.state_bucket }}"
+          fi
+
+          BUCKET_REGION_ARG=""
+          if [ -n "${{ github.event.inputs.state_bucket_region }}" ]; then
+            BUCKET_REGION_ARG="--state-bucket-region ${{ github.event.inputs.state_bucket_region }}"
+          fi
+
+          python3 scripts/config_manager.py add-deployment \
+            --deployment-id "${{ github.event.inputs.deployment_id }}" \
+            --account-id    "${{ github.event.inputs.account_id }}" \
+            --region        "${{ github.event.inputs.region }}" \
+            --environment   "${{ github.event.inputs.environment }}" \
+            $RATE_ARG \
+            $BUCKET_ARG \
+            $BUCKET_REGION_ARG \
+            > config/deployments.yaml.new
+
+          mv config/deployments.yaml.new config/deployments.yaml
+
+      - name: Create branch and commit
+        id: commit
+        run: |
+          BRANCH="waf-config/add-deployment-${{ github.event.inputs.deployment_id }}-${{ github.run_id }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add config/deployments.yaml
+          git commit -m "waf: add deployment ${{ github.event.inputs.deployment_id }} (account ${{ github.event.inputs.account_id }}, ${{ github.event.inputs.region }})"
+          git push origin "$BRANCH"
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --title "WAF: Add deployment ${{ github.event.inputs.deployment_id }}" \
+            --body "$(cat <<'EOF'
+          ## New WAF Deployment
+
+          | Field | Value |
+          |---|---|
+          | Deployment ID | \`${{ github.event.inputs.deployment_id }}\` |
+          | Account ID | \`${{ github.event.inputs.account_id }}\` |
+          | Region | \`${{ github.event.inputs.region }}\` |
+          | Environment | \`${{ github.event.inputs.environment }}\` |
+          | Rate limit | \`${{ github.event.inputs.rate_limit || 'default' }}\` |
+          | State bucket | \`${{ github.event.inputs.state_bucket || format('metricstream-terraform-state-{0}', github.event.inputs.account_id) }}\` |
+          | State bucket region | \`${{ github.event.inputs.state_bucket_region || github.event.inputs.region }}\` |
+          | Requested by | @${{ github.actor }} |
+
+          **Reason:** ${{ github.event.inputs.reason }}
+
+          ---
+
+          **Pre-merge checklist:**
+          - [ ] IAM role \`MetricStreamWAFDeploy\` exists in account \`${{ github.event.inputs.account_id }}\`
+          - [ ] GitHub OIDC trust policy is configured for this role (see docs/bootstrap.md)
+          - [ ] Terraform plan output reviewed (posted as a comment by CI)
+
+          **Post-merge checklist:**
+          - [ ] Deployment verified via post_deploy_verify.sh
+          - [ ] WAF ARN registered in DuploCloud (see Terraform output)
+          - [ ] CloudWatch alarms receiving data
+
+          > ⚠️ Production deployments require Infrastructure Lead + Security Team Lead approval.
+          EOF
+          )" \
+            --head "${{ steps.commit.outputs.branch }}" \
+            --base main

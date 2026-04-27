@@ -1,0 +1,166 @@
+################################################################################
+# Manage Customer IP Whitelists — workflow_dispatch
+#
+# Add, update, or remove a customer IP whitelist for any deployment.
+# No file editing required — fill in the form in the GitHub Actions UI.
+#
+# Flow:
+#   1. Operator fills in the form
+#   2. Workflow updates config/deployments.yaml via config_manager.py
+#   3. Commits the change to a new branch and opens a PR
+#   4. Normal CI pipeline runs (plan + required approval for prod)
+#   5. Merge deploys the change atomically (IP sets update with zero downtime)
+################################################################################
+
+name: Manage Customer IP Whitelist
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Operation'
+        required: true
+        type: choice
+        options:
+          - add-or-update
+          - remove
+      deployment_id:
+        description: 'Deployment ID (e.g. prod-us-east-1, nonprod-us-east-1)'
+        required: true
+      customer_key:
+        description: 'Customer identifier — short slug, lowercase, no spaces (e.g. acme-corp)'
+        required: true
+      hostname:
+        description: '[add-or-update] Exact customer hostname (e.g. acme.metricstream.com)'
+        required: false
+      allowed_ips:
+        description: '[add-or-update] Comma-separated IPv4 CIDRs (e.g. 203.0.113.0/24,198.51.100.10/32)'
+        required: false
+      allowed_ips_ipv6:
+        description: '[add-or-update] Comma-separated IPv6 CIDRs (leave empty if not needed)'
+        required: false
+        default: ''
+      priority_offset:
+        description: '[add-or-update] Unique integer 0-89 (WAF priority = 10 + offset). Check existing entries first.'
+        required: false
+      reason:
+        description: 'Business reason (included in PR description and audit trail)'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  update-config:
+    name: Update Customer IP Whitelist and Open PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Validate inputs for add-or-update
+        if: github.event.inputs.operation == 'add-or-update'
+        run: |
+          if [ -z "${{ github.event.inputs.hostname }}" ]; then
+            echo "ERROR: hostname is required for add-or-update" >&2; exit 1
+          fi
+          if [ -z "${{ github.event.inputs.allowed_ips }}" ]; then
+            echo "ERROR: allowed_ips is required for add-or-update" >&2; exit 1
+          fi
+          if [ -z "${{ github.event.inputs.priority_offset }}" ]; then
+            echo "ERROR: priority_offset is required for add-or-update" >&2; exit 1
+          fi
+
+      - name: Apply config change
+        id: change
+        run: |
+          OP="${{ github.event.inputs.operation }}"
+          DEP="${{ github.event.inputs.deployment_id }}"
+          KEY="${{ github.event.inputs.customer_key }}"
+
+          if [ "$OP" = "add-or-update" ]; then
+            IPV6_ARG=""
+            if [ -n "${{ github.event.inputs.allowed_ips_ipv6 }}" ]; then
+              IPV6_ARG="--allowed-ips-ipv6 ${{ github.event.inputs.allowed_ips_ipv6 }}"
+            fi
+
+            python3 scripts/config_manager.py add-customer \
+              --deployment-id  "$DEP" \
+              --customer-key   "$KEY" \
+              --hostname       "${{ github.event.inputs.hostname }}" \
+              --allowed-ips    "${{ github.event.inputs.allowed_ips }}" \
+              --priority-offset "${{ github.event.inputs.priority_offset }}" \
+              $IPV6_ARG \
+              > config/deployments.yaml.new
+            echo "summary=Add/update IP whitelist for \`$KEY\` in \`$DEP\`" >> $GITHUB_OUTPUT
+
+          elif [ "$OP" = "remove" ]; then
+            python3 scripts/config_manager.py remove-customer \
+              --deployment-id "$DEP" \
+              --customer-key  "$KEY" \
+              > config/deployments.yaml.new
+            echo "summary=Remove IP whitelist for \`$KEY\` from \`$DEP\`" >> $GITHUB_OUTPUT
+          fi
+
+          mv config/deployments.yaml.new config/deployments.yaml
+
+      - name: Create branch and commit
+        id: commit
+        run: |
+          BRANCH="waf-config/customer-ip-$(echo '${{ github.event.inputs.customer_key }}' | tr '/' '-')-${{ github.event.inputs.deployment_id }}-${{ github.run_id }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add config/deployments.yaml
+          git commit -m "waf: ${{ steps.change.outputs.summary }}"
+          git push origin "$BRANCH"
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --title "WAF: ${{ steps.change.outputs.summary }}" \
+            --body "$(cat <<'EOF'
+          ## Customer IP Whitelist Change
+
+          **Deployment:** \`${{ github.event.inputs.deployment_id }}\`
+          **Customer key:** \`${{ github.event.inputs.customer_key }}\`
+          **Operation:** ${{ github.event.inputs.operation }}
+          **Requested by:** @${{ github.actor }}
+
+          **Reason / Ticket:** ${{ github.event.inputs.reason }}
+
+          | Field | Value |
+          |---|---|
+          | Hostname | \`${{ github.event.inputs.hostname }}\` |
+          | IPv4 CIDRs | \`${{ github.event.inputs.allowed_ips }}\` |
+          | IPv6 CIDRs | \`${{ github.event.inputs.allowed_ips_ipv6 }}\` |
+          | Priority offset | \`${{ github.event.inputs.priority_offset }}\` |
+
+          ---
+
+          **Verification checklist (after merge and deploy):**
+          - [ ] Access from allowed IP succeeds (HTTP 200)
+          - [ ] Access from non-listed IP is blocked (HTTP 403 with JSON error body)
+          - [ ] Customer notified
+
+          > ⚠️ Production deployments require Infrastructure Lead approval before merge.
+          EOF
+          )" \
+            --head "${{ steps.commit.outputs.branch }}" \
+            --base main

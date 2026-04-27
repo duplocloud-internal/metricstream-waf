@@ -1,0 +1,157 @@
+################################################################################
+# MetricStream WAF — Deployment Registry
+#
+# This is the ONLY file you need to edit to manage WAF deployments.
+# Add an entry for each AWS account + region where WAF should run.
+# CI/CD reads this file and automatically plans, applies, and drift-checks
+# all listed deployments.
+#
+# ADDING A NEW DEPLOYMENT:
+#   1. Add an entry to state_backends for the target account (if not present)
+#   2. Add an entry under `deployments:` below
+#   3. Ensure the IAM role exists in the target account (see docs/bootstrap.md)
+#   4. Open a PR — CI will plan it automatically
+#   5. Merge — CI will apply it automatically (prod requires approval)
+#
+# deployment_id (the map key):
+#   Unique identifier used in Terraform state keys and resource names.
+#   Convention: {environment}-{region}
+#   If the same account hosts multiple environments in the same region, use:
+#                {environment}-{short-account-alias}-{region}
+################################################################################
+
+# ── State backends (one per AWS account) ─────────────────────────────────────
+# Key = 12-digit AWS account ID (must be a quoted string).
+# Each account has its own S3 bucket + DynamoDB table for Terraform state.
+# Benefits vs. a shared bucket:
+#   - No cross-account IAM needed — each role only touches its own bucket
+#   - Clear blast radius — a corrupted state in account A can't affect B
+#   - Easier offboarding — delete the account entry and its bucket independently
+#
+# Bootstrap (run once per account):
+#   See docs/bootstrap.md — "Phase 2: Bootstrap Terraform State Resources"
+#
+# Backend resolution order (most → least specific):
+#   1. Per-deployment state_backend override (inside a deployments entry)
+#   2. state_backends[account_id]            (this map)
+#   3. state_backend                         (legacy single-bucket fallback)
+state_backends:
+  "419707449206":                            # ← prod account (example)
+    bucket:         "metricstream-terraform-state-419707449206"
+    region:         "us-east-1"             # region where THIS bucket lives
+    dynamodb_table: "metricstream-terraform-locks"
+
+  # "987654321098":                            # ← nonprod account (example)
+  #   bucket:         "metricstream-terraform-state-987654321098"
+  #   region:         "us-east-1"
+  #   dynamodb_table: "metricstream-terraform-locks"
+
+  # Add more accounts here as you onboard them:
+  # "555555555555":
+  #   bucket:         "metricstream-terraform-state-555555555555"
+  #   region:         "eu-west-1"
+  #   dynamodb_table: "metricstream-terraform-locks"
+
+# ── IAM role name (must exist in every target account) ───────────────────────
+# CI/CD constructs: arn:aws:iam::{account_id}:role/{iam_role_name}
+# Same role name across all accounts simplifies management.
+# See docs/bootstrap.md for the trust policy and minimum permissions.
+iam_role_name: "MetricStreamWAFDeploy"
+
+# ── Deployments ───────────────────────────────────────────────────────────────
+deployments:
+
+  # ── Production — US East 1 ─────────────────────────────────────────────────
+  prod-us-east-1:
+    account_id:  "419707449206"     # ← replace with real AWS account ID
+    region:      "us-east-1"
+    environment: "prod"
+
+    rate_limit_threshold:        2000   # requests per IP per 5-min window
+    log_retention_days:          365
+    cloudwatch_retention_days:   90
+    object_lock_retention_days:  90
+    alarm_high_block_threshold:  1000
+    alarm_low_allowed_threshold: 100
+
+    # SNS topics for CloudWatch alarms (replace ARNs after bootstrap)
+    alarm_sns_arns: []
+    # alarm_sns_arns:
+    #   - "arn:aws:sns:us-east-1:123456789012:security-alerts"
+    #   - "arn:aws:sns:us-east-1:123456789012:platform-alerts"
+
+    # Existing KMS key ARN — leave empty to auto-create
+    kms_key_arn: ""
+
+    # Managed rule modes — "block" or "count" per rule group.
+    # Start rules in "count" during validation, then switch to "block".
+    # Change via GitHub Actions: Actions → Manage WAF Rules → Run workflow
+    managed_rule_modes:
+      AmazonIpReputationList: "block"   # safe to block immediately
+      AnonymousIpList:        "count"   # switch to block after 1-2 weeks
+      KnownBadInputsRuleSet:  "block"   # safe to block immediately
+      CommonRuleSet:          "count"   # switch to block after FP analysis
+
+    # Customer IP whitelists — add entries as customers onboard
+    customer_ip_whitelists: {}
+    # customer_ip_whitelists:
+    #   acme-corp:
+    #     hostname:              "acme.metricstream.com"
+    #     allowed_ip_cidrs:      ["203.0.113.0/24"]
+    #     allowed_ip_cidrs_ipv6: []
+    #     priority_offset:       0     # → WAF priority 10
+
+    crs_rule_overrides: []
+    # crs_rule_overrides:
+    #   - rule_name:     "SizeRestrictions_BODY"
+    #     reason:        "Bulk import API sends POST bodies up to 5MB. Ticket #12345"
+    #     approved_by:   "Security Team Lead — Jane Smith"
+    #     approved_date: "2026-04-01"
+
+    # Optional: per-deployment state backend override.
+    # Uncomment ONLY if this deployment needs a different bucket than the
+    # account-level entry in state_backends above.
+    # state_backend:
+    #   bucket:         "custom-state-bucket"
+    #   region:         "us-east-1"
+    #   dynamodb_table: "custom-lock-table"
+
+  # ── Production — EU West 1 (uncomment to enable) ───────────────────────────
+  # prod-eu-west-1:
+  #   account_id:  "123456789012"
+  #   region:      "eu-west-1"
+  #   environment: "prod"
+  #   rate_limit_threshold:        2000
+  #   log_retention_days:          365
+  #   cloudwatch_retention_days:   90
+  #   object_lock_retention_days:  90
+  #   alarm_high_block_threshold:  1000
+  #   alarm_low_allowed_threshold: 100
+  #   alarm_sns_arns:              []
+  #   kms_key_arn:                 ""
+  #   customer_ip_whitelists:      {}
+  #   crs_rule_overrides:          []
+  # Note: prod-eu-west-1 reuses the 123456789012 entry in state_backends above.
+  #       The state key will be: waf/prod-eu-west-1/terraform.tfstate
+
+  # ── Nonprod — US East 1 ────────────────────────────────────────────────────
+  nonprod-us-east-1:
+    account_id:  "419707449206"     # ← replace with real AWS account ID
+    region:      "us-east-1"
+    environment: "nonprod"
+
+    rate_limit_threshold:        500
+    log_retention_days:          90
+    cloudwatch_retention_days:   30
+    object_lock_retention_days:  30
+    alarm_high_block_threshold:  200
+    alarm_low_allowed_threshold: 10
+    alarm_sns_arns:              []
+    kms_key_arn:                 ""
+    managed_rule_modes:
+      AmazonIpReputationList: "block"
+      AnonymousIpList:        "count"
+      KnownBadInputsRuleSet:  "block"
+      CommonRuleSet:          "count"
+    customer_ip_whitelists:      {}
+    crs_rule_overrides:          []

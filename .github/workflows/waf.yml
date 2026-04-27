@@ -1,0 +1,444 @@
+################################################################################
+# MetricStream WAF — CI/CD Pipeline
+#
+# Deployments are driven by config/deployments.yaml.
+# To add a new account+region, edit that file and open a PR.
+#
+# FLOW
+# ────
+#   PR to main
+#     → validate → plan (all deployments, parallel)
+#
+#   Push to main
+#     → deploy nonprod (all nonprod deployments, parallel, auto)
+#     → deploy prod    (all prod deployments, parallel, requires approval)
+#
+#   Daily 09:00 UTC
+#     → drift detection (all deployments)
+#
+#   Manual dispatch
+#     → plan or apply for a specific deployment
+#
+# SECRETS  (GitHub repo → Settings → Secrets → Actions)
+# ───────────────────────────────────────────────────────
+#   SLACK_WEBHOOK    — Slack incoming webhook URL for notifications
+#
+# OIDC ROLE (per target account)
+# ──────────────────────────────
+#   Role name : MetricStreamWAFDeploy   (same name in every account)
+#   Role ARN  : arn:aws:iam::{account_id}:role/MetricStreamWAFDeploy
+#   Trust     : github.com OIDC, repo metricstream/metricstream-waf
+#   See docs/bootstrap.md for the trust policy.
+#
+# GITHUB ENVIRONMENTS
+# ────────────────────
+#   nonprod — no approval required (auto-deploy on merge)
+#   prod    — required reviewers: Infrastructure Lead + Security Team Lead
+################################################################################
+
+name: MetricStream WAF
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'config/deployments.yaml'
+      - 'terraform/**'
+      - 'scripts/**'
+  push:
+    branches: [main]
+    paths:
+      - 'config/deployments.yaml'
+      - 'terraform/**'
+  schedule:
+    - cron: '0 9 * * *'   # Daily drift detection at 09:00 UTC
+  workflow_dispatch:
+    inputs:
+      deployment_id:
+        description: 'Deployment ID from deployments.yaml (e.g. prod-us-east-1)'
+        required: true
+      action:
+        description: 'Terraform action'
+        required: true
+        type: choice
+        options: [plan, apply]
+      reason:
+        description: 'Reason for manual deployment (required for prod apply)'
+        required: false
+
+env:
+  TF_VERSION:     '1.5.0'
+  PYTHON_VERSION: '3.11'
+
+permissions:
+  id-token:      write   # Required for OIDC AWS authentication
+  contents:      read
+  pull-requests: write   # Post plan output as PR comments
+
+################################################################################
+# Job: Generate matrix from deployments.yaml
+# All subsequent jobs depend on this to know which deployments to target.
+################################################################################
+
+jobs:
+
+  setup-matrix:
+    name: Load Deployment Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix-all:     ${{ steps.gen-all.outputs.matrix }}
+      matrix-prod:    ${{ steps.gen-prod.outputs.matrix }}
+      matrix-nonprod: ${{ steps.gen-nonprod.outputs.matrix }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Generate full matrix
+        id: gen-all
+        run: |
+          MATRIX=$(python3 scripts/generate_matrix.py)
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+      - name: Generate prod matrix
+        id: gen-prod
+        run: |
+          MATRIX=$(python3 scripts/generate_matrix.py --env prod)
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+      - name: Generate nonprod matrix
+        id: gen-nonprod
+        run: |
+          MATRIX=$(python3 scripts/generate_matrix.py --env nonprod)
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+  ################################################################################
+  # Job: Validate (PR only)
+  # Runs pre-deployment checks and terraform fmt/validate for all deployments.
+  ################################################################################
+
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    needs: setup-matrix
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Validate deployments.yaml
+        run: python3 scripts/validation/pre_deploy_validate.py --config config/deployments.yaml
+
+      - name: Terraform format check
+        run: |
+          terraform fmt -check -recursive terraform/
+          echo "✓ Terraform files are correctly formatted"
+
+      - name: Terraform validate (deployment root)
+        working-directory: terraform/deployment
+        run: |
+          terraform init -backend=false
+          terraform validate
+          echo "✓ Terraform configuration is valid"
+
+  ################################################################################
+  # Job: Plan (PR only, all deployments in parallel)
+  # Each matrix entry assumes the role for its target account,
+  # runs terraform plan, and posts the result as a PR comment.
+  ################################################################################
+
+  plan:
+    name: Plan — ${{ matrix.deployment_id }}
+    runs-on: ubuntu-latest
+    needs: [setup-matrix, validate]
+    if: github.event_name == 'pull_request'
+    strategy:
+      matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix-all) }}
+      fail-fast: false   # plan all deployments even if one fails
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume role — ${{ matrix.account_id }} (${{ matrix.region }})
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ matrix.account_id }}:role/MetricStreamWAFDeploy
+          aws-region: ${{ matrix.region }}
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Terraform plan — ${{ matrix.deployment_id }}
+        id: plan
+        run: |
+          python3 scripts/orchestrate.py plan --deployment ${{ matrix.deployment_id }} 2>&1 | tee plan-output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+
+      - name: Post plan to PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs   = require('fs');
+            const raw  = fs.readFileSync('plan-output.txt', 'utf8');
+            const body = raw.length > 60000 ? raw.slice(0, 60000) + '\n...(truncated)' : raw;
+            const icon = '${{ steps.plan.outputs.exit_code }}' === '0' ? '✅' : '❌';
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ${icon} Terraform Plan — \`${{ matrix.deployment_id }}\`
+            > Account \`${{ matrix.account_id }}\` · Region \`${{ matrix.region }}\` · Env \`${{ matrix.environment }}\`
+
+            <details><summary>Show Plan Output</summary>
+
+            \`\`\`
+            ${body}
+            \`\`\`
+            </details>`
+            });
+
+  ################################################################################
+  # Job: Deploy nonprod (auto on merge to main)
+  ################################################################################
+
+  deploy-nonprod:
+    name: Deploy — ${{ matrix.deployment_id }}
+    runs-on: ubuntu-latest
+    needs: setup-matrix
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: nonprod
+    strategy:
+      matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix-nonprod) }}
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume role — ${{ matrix.account_id }} (${{ matrix.region }})
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ matrix.account_id }}:role/MetricStreamWAFDeploy
+          aws-region: ${{ matrix.region }}
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Apply — ${{ matrix.deployment_id }}
+        run: python3 scripts/orchestrate.py apply --deployment ${{ matrix.deployment_id }}
+
+      - name: Post-deployment verification
+        run: |
+          chmod +x scripts/deployment/post_deploy_verify.sh
+          ./scripts/deployment/post_deploy_verify.sh \
+            --env ${{ matrix.environment }} \
+            --region ${{ matrix.region }}
+
+      - name: Notify Slack — success
+        if: success()
+        run: |
+          curl -s -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            -d "{\"text\": \"✅ WAF deployed: \`${{ matrix.deployment_id }}\` (account \`${{ matrix.account_id }}\`, commit \`${{ github.sha }}\`)\"}"
+
+      - name: Notify Slack — failure
+        if: failure()
+        run: |
+          curl -s -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            -d "{\"text\": \"🚨 WAF deploy FAILED: \`${{ matrix.deployment_id }}\`. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+
+  ################################################################################
+  # Job: Deploy prod (requires GitHub environment approval)
+  # Runs after all nonprod deployments succeed.
+  ################################################################################
+
+  deploy-prod:
+    name: Deploy — ${{ matrix.deployment_id }}
+    runs-on: ubuntu-latest
+    needs: [setup-matrix, deploy-nonprod]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # GitHub "prod" environment requires Infrastructure Lead + Security Lead approval
+    environment: prod
+    strategy:
+      matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix-prod) }}
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume role — ${{ matrix.account_id }} (${{ matrix.region }})
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ matrix.account_id }}:role/MetricStreamWAFDeploy
+          aws-region: ${{ matrix.region }}
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Apply — ${{ matrix.deployment_id }}
+        run: python3 scripts/orchestrate.py apply --deployment ${{ matrix.deployment_id }}
+
+      - name: Post-deployment verification
+        run: |
+          chmod +x scripts/deployment/post_deploy_verify.sh
+          ./scripts/deployment/post_deploy_verify.sh \
+            --env ${{ matrix.environment }} \
+            --region ${{ matrix.region }}
+
+      - name: Print WAF ARN (register in DuploCloud)
+        working-directory: terraform/deployment
+        run: terraform output duplocloud_registration_instructions
+
+      - name: Notify Slack — success
+        if: success()
+        run: |
+          curl -s -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            -d "{\"text\": \"✅ WAF *prod* deployed: \`${{ matrix.deployment_id }}\` (account \`${{ matrix.account_id }}\`, commit \`${{ github.sha }}\`)\"}"
+
+      - name: Notify Slack — failure
+        if: failure()
+        run: |
+          curl -s -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            -d "{\"text\": \"🚨 WAF *prod* deploy FAILED: \`${{ matrix.deployment_id }}\`. Immediate attention required. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+
+  ################################################################################
+  # Job: Daily drift detection (all deployments, each in its own account+region)
+  ################################################################################
+
+  drift-detection:
+    name: Drift — ${{ matrix.deployment_id }}
+    runs-on: ubuntu-latest
+    needs: setup-matrix
+    if: github.event_name == 'schedule'
+    strategy:
+      matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix-all) }}
+      fail-fast: false   # check all deployments even if one has drift
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume role — ${{ matrix.account_id }} (${{ matrix.region }})
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ matrix.account_id }}:role/MetricStreamWAFDeploy
+          aws-region: ${{ matrix.region }}
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Check drift — ${{ matrix.deployment_id }}
+        run: python3 scripts/orchestrate.py drift --deployment ${{ matrix.deployment_id }}
+
+      - name: Alert Slack on drift
+        if: failure()
+        run: |
+          curl -s -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            -d "{\"text\": \"🚨 WAF DRIFT DETECTED: \`${{ matrix.deployment_id }}\` (account \`${{ matrix.account_id }}\`, region \`${{ matrix.region }}\`). See runbook: docs/runbook.md#drift-detection\"}"
+
+  ################################################################################
+  # Job: Manual dispatch — plan or apply a specific deployment
+  ################################################################################
+
+  manual-dispatch:
+    name: Manual — ${{ github.event.inputs.action }} ${{ github.event.inputs.deployment_id }}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    # Uses the environment matching the target deployment's environment
+    # (prod deployments still require approval even when manually triggered)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Resolve target account and region
+        id: resolve
+        run: |
+          python3 - <<'EOF'
+          import yaml, sys, os
+          with open("config/deployments.yaml") as f:
+              cfg = yaml.safe_load(f)
+          dep_id = "${{ github.event.inputs.deployment_id }}"
+          if dep_id not in cfg["deployments"]:
+              print(f"ERROR: deployment '{dep_id}' not in deployments.yaml", file=sys.stderr)
+              sys.exit(1)
+          dep = cfg["deployments"][dep_id]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"account_id={dep['account_id']}\n")
+              out.write(f"region={dep['region']}\n")
+              out.write(f"environment={dep['environment']}\n")
+          EOF
+
+      - name: Assume role — ${{ steps.resolve.outputs.account_id }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ steps.resolve.outputs.account_id }}:role/MetricStreamWAFDeploy
+          aws-region: ${{ steps.resolve.outputs.region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: ${{ github.event.inputs.action }} — ${{ github.event.inputs.deployment_id }}
+        run: |
+          python3 scripts/orchestrate.py ${{ github.event.inputs.action }} \
+            --deployment ${{ github.event.inputs.deployment_id }}
