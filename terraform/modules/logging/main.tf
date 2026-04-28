@@ -26,6 +26,17 @@ resource "aws_s3_bucket" "waf_logs" {
   })
 }
 
+# Ownership controls: BucketOwnerPreferred keeps ACLs enabled.
+# Required for WAFv2 — it validates logging by writing with s3:x-amz-acl: bucket-owner-full-control.
+# BucketOwnerEnforced (AWS default since 2023) disables ACLs and causes PutLoggingConfiguration to fail.
+resource "aws_s3_bucket_ownership_controls" "waf_logs" {
+  bucket = aws_s3_bucket.waf_logs.id
+
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
+}
+
 # Block all public access
 resource "aws_s3_bucket_public_access_block" "waf_logs" {
   bucket                  = aws_s3_bucket.waf_logs.id
@@ -104,7 +115,10 @@ resource "aws_s3_bucket_policy" "waf_logs" {
   bucket = aws_s3_bucket.waf_logs.id
   policy = data.aws_iam_policy_document.waf_logs_bucket_policy.json
 
-  depends_on = [aws_s3_bucket_public_access_block.waf_logs]
+  depends_on = [
+    aws_s3_bucket_public_access_block.waf_logs,
+    aws_s3_bucket_ownership_controls.waf_logs,
+  ]
 }
 
 data "aws_iam_policy_document" "waf_logs_bucket_policy" {
@@ -126,9 +140,9 @@ data "aws_iam_policy_document" "waf_logs_bucket_policy" {
   }
 
   # Allow WAF log delivery — path must be AWSLogs/{account_id}/* (WAFv2 requirement).
-  # No s3:x-amz-acl condition: bucket uses BucketOwnerEnforced (ACLs disabled),
-  # so the delivery service cannot send ACL headers and any ACL condition would
-  # permanently block WAFv2's internal permission validation.
+  # The s3:x-amz-acl condition requires BucketOwnerPreferred (ACLs enabled).
+  # WAFv2 validates logging by writing with bucket-owner-full-control ACL header;
+  # without this condition + ACLs enabled, PutLoggingConfiguration returns AccessDeniedException.
   statement {
     sid    = "AllowWAFLogDelivery"
     effect = "Allow"
@@ -142,6 +156,11 @@ data "aws_iam_policy_document" "waf_logs_bucket_policy" {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
       values   = [data.aws_caller_identity.current.account_id]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
     }
   }
 
