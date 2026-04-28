@@ -125,7 +125,7 @@ data "aws_iam_policy_document" "waf_logs_bucket_policy" {
     }
   }
 
-  # Allow WAF log delivery
+  # Allow WAF log delivery — path must be AWSLogs/{account_id}/* (WAFv2 requirement)
   statement {
     sid    = "AllowWAFLogDelivery"
     effect = "Allow"
@@ -134,7 +134,7 @@ data "aws_iam_policy_document" "waf_logs_bucket_policy" {
       identifiers = ["delivery.logs.amazonaws.com"]
     }
     actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.waf_logs.arn}/waf-logs/*"]
+    resources = ["${aws_s3_bucket.waf_logs.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
     condition {
       test     = "StringEquals"
       variable = "s3:x-amz-acl"
@@ -155,7 +155,7 @@ data "aws_iam_policy_document" "waf_logs_bucket_policy" {
       type        = "Service"
       identifiers = ["delivery.logs.amazonaws.com"]
     }
-    actions   = ["s3:GetBucketAcl"]
+    actions   = ["s3:GetBucketAcl", "s3:ListBucket"]
     resources = [aws_s3_bucket.waf_logs.arn]
     condition {
       test     = "StringEquals"
