@@ -80,18 +80,19 @@ resource "aws_s3_bucket_lifecycle_configuration" "waf_logs" {
 
     filter {}
 
+    # Transition to Glacier after 30 days — logs are rarely queried after a month.
+    # Must be strictly less than log_retention_days (enforced by AWS).
     transition {
-      days          = 90
+      days          = 30
       storage_class = "GLACIER"
     }
 
-    # Only expire after Object Lock retention period is satisfied
     expiration {
       days = var.log_retention_days
     }
 
     noncurrent_version_expiration {
-      noncurrent_days = 30
+      noncurrent_days = 7
     }
   }
 

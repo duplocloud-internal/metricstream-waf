@@ -201,17 +201,9 @@ cat > /tmp/waf-deploy-policy.json << EOF
       "Action": [
         "s3:Get*",
         "s3:List*",
+        "s3:Put*",
         "s3:CreateBucket",
         "s3:DeleteBucket",
-        "s3:PutBucketEncryption",
-        "s3:PutBucketObjectLockConfiguration",
-        "s3:PutBucketOwnershipControls",
-        "s3:PutBucketPolicy",
-        "s3:PutBucketPublicAccessBlock",
-        "s3:PutBucketTagging",
-        "s3:PutBucketVersioning",
-        "s3:PutLifecycleConfiguration",
-        "s3:PutObject",
         "s3:DeleteObject"
       ],
       "Resource": [
