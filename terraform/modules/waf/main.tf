@@ -339,14 +339,6 @@ resource "aws_wafv2_web_acl" "main" {
     sampled_requests_enabled   = true
   }
 
-  # Prevent accidental destruction of the Web ACL.
-  # Destroying it would orphan all DuploCloud-managed ALB associations (they are
-  # keyed to the ARN and are not managed by Terraform). If a rename is truly
-  # needed, remove this block temporarily, apply, restore it, then apply again.
-  lifecycle {
-    prevent_destroy = true
-  }
-
   tags = merge(var.common_tags, {
     Name        = "metricstream-waf-${var.environment}"
     Environment = var.environment
