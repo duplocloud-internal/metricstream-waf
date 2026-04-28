@@ -269,16 +269,20 @@ jobs:
             --region ${{ matrix.region }}
 
       - name: Notify Slack — success
-        if: success()
+        if: success() && env.SLACK_WEBHOOK != ''
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: |
-          curl -s -X POST ${{ secrets.SLACK_WEBHOOK }} \
+          curl -s -X POST "$SLACK_WEBHOOK" \
             -H 'Content-type: application/json' \
             -d "{\"text\": \"✅ WAF deployed: \`${{ matrix.deployment_id }}\` (account \`${{ matrix.account_id }}\`, commit \`${{ github.sha }}\`)\"}"
 
       - name: Notify Slack — failure
-        if: failure()
+        if: failure() && env.SLACK_WEBHOOK != ''
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: |
-          curl -s -X POST ${{ secrets.SLACK_WEBHOOK }} \
+          curl -s -X POST "$SLACK_WEBHOOK" \
             -H 'Content-type: application/json' \
             -d "{\"text\": \"🚨 WAF deploy FAILED: \`${{ matrix.deployment_id }}\`. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
 
@@ -333,16 +337,20 @@ jobs:
         run: terraform output duplocloud_registration_instructions
 
       - name: Notify Slack — success
-        if: success()
+        if: success() && env.SLACK_WEBHOOK != ''
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: |
-          curl -s -X POST ${{ secrets.SLACK_WEBHOOK }} \
+          curl -s -X POST "$SLACK_WEBHOOK" \
             -H 'Content-type: application/json' \
             -d "{\"text\": \"✅ WAF *prod* deployed: \`${{ matrix.deployment_id }}\` (account \`${{ matrix.account_id }}\`, commit \`${{ github.sha }}\`)\"}"
 
       - name: Notify Slack — failure
-        if: failure()
+        if: failure() && env.SLACK_WEBHOOK != ''
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: |
-          curl -s -X POST ${{ secrets.SLACK_WEBHOOK }} \
+          curl -s -X POST "$SLACK_WEBHOOK" \
             -H 'Content-type: application/json' \
             -d "{\"text\": \"🚨 WAF *prod* deploy FAILED: \`${{ matrix.deployment_id }}\`. Immediate attention required. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
 
@@ -383,9 +391,11 @@ jobs:
         run: python3 scripts/orchestrate.py drift --deployment ${{ matrix.deployment_id }}
 
       - name: Alert Slack on drift
-        if: failure()
+        if: failure() && env.SLACK_WEBHOOK != ''
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: |
-          curl -s -X POST ${{ secrets.SLACK_WEBHOOK }} \
+          curl -s -X POST "$SLACK_WEBHOOK" \
             -H 'Content-type: application/json' \
             -d "{\"text\": \"🚨 WAF DRIFT DETECTED: \`${{ matrix.deployment_id }}\` (account \`${{ matrix.account_id }}\`, region \`${{ matrix.region }}\`). See runbook: docs/runbook.md#drift-detection\"}"
 
