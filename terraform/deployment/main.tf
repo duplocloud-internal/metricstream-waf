@@ -131,5 +131,4 @@ module "waf" {
 
   common_tags = local.common_tags
 
-  depends_on = [module.logging, module.ip_sets]
 }
