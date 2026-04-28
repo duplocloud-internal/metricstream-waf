@@ -24,10 +24,6 @@ resource "aws_s3_bucket" "waf_logs" {
     Name    = "aws-waf-logs-metricstream-${var.environment}"
     Purpose = "waf-logging"
   })
-
-  lifecycle {
-    prevent_destroy = true
-  }
 }
 
 # Block all public access
