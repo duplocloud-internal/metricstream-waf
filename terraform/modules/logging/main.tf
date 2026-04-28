@@ -125,7 +125,10 @@ data "aws_iam_policy_document" "waf_logs_bucket_policy" {
     }
   }
 
-  # Allow WAF log delivery — path must be AWSLogs/{account_id}/* (WAFv2 requirement)
+  # Allow WAF log delivery — path must be AWSLogs/{account_id}/* (WAFv2 requirement).
+  # No s3:x-amz-acl condition: bucket uses BucketOwnerEnforced (ACLs disabled),
+  # so the delivery service cannot send ACL headers and any ACL condition would
+  # permanently block WAFv2's internal permission validation.
   statement {
     sid    = "AllowWAFLogDelivery"
     effect = "Allow"
@@ -135,11 +138,6 @@ data "aws_iam_policy_document" "waf_logs_bucket_policy" {
     }
     actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.waf_logs.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
-    condition {
-      test     = "StringEquals"
-      variable = "s3:x-amz-acl"
-      values   = ["bucket-owner-full-control"]
-    }
     condition {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
