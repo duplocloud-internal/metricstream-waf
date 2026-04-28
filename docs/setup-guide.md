@@ -196,6 +196,18 @@ cat > /tmp/waf-deploy-policy.json << EOF
     },
 
     {
+      "Sid": "WAFLoggingServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/wafv2.amazonaws.com/AWSServiceRoleForWAFV2Logging",
+      "Condition": {
+        "StringLike": {
+          "iam:AWSServiceName": "wafv2.amazonaws.com"
+        }
+      }
+    },
+
+    {
       "Sid": "WAFLogBucketAccess",
       "Effect": "Allow",
       "Action": [
