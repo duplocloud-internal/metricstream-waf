@@ -28,7 +28,7 @@ locals {
 
 resource "aws_wafv2_web_acl" "main" {
   name        = "metricstream-waf-${var.environment}-${data.aws_region.current.name}"
-  description = "MetricStream ${var.environment} WAF — global rules + IP-whitelisting scope-down"
+  description = "MetricStream ${var.environment} WAF - global rules + IP-whitelisting scope-down"
   scope       = "REGIONAL"
 
   default_action {
