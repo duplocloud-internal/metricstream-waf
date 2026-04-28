@@ -41,10 +41,6 @@ variable "s3_log_bucket_arn" {
   type        = string
 }
 
-variable "cloudwatch_log_group_arn" {
-  description = "ARN of CloudWatch log group for WAF logs (from logging module output)"
-  type        = string
-}
 
 variable "rate_limit_threshold" {
   description = <<-EOT

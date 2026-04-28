@@ -123,8 +123,7 @@ module "waf" {
   ip_set_arns      = module.ip_sets.ip_set_arns
   ip_set_arns_ipv6 = module.ip_sets.ip_set_arns_ipv6
 
-  s3_log_bucket_arn        = module.logging.s3_bucket_arn
-  cloudwatch_log_group_arn = module.logging.cloudwatch_log_group_arn
+  s3_log_bucket_arn = module.logging.s3_bucket_arn
 
   rate_limit_threshold = var.rate_limit_threshold
   crs_rule_overrides   = var.crs_rule_overrides

@@ -358,17 +358,18 @@ resource "aws_wafv2_web_acl" "main" {
 
 ################################################################################
 # WAF Logging Configuration
-# Logs to both S3 (long-term) and CloudWatch (real-time/SIEM)
-# Filtered to BLOCK actions only to reduce volume and cost
+# Logs to S3 (long-term, Object Lock, SSE-KMS).
+# AWS WAF supports only one logging destination per Web ACL.
+# CloudWatch log group is created separately (for metrics/dashboards) but is
+# not used as a WAF log destination — WAF requires log group names starting
+# with "aws-waf-logs-", and direct CloudWatch WAF logging counts as a
+# separate destination slot.
 ################################################################################
 
 resource "aws_wafv2_web_acl_logging_configuration" "main" {
   resource_arn = aws_wafv2_web_acl.main.arn
 
-  log_destination_configs = compact([
-    var.s3_log_bucket_arn,
-    var.cloudwatch_log_group_arn,
-  ])
+  log_destination_configs = [var.s3_log_bucket_arn]
 
   logging_filter {
     default_behavior = "DROP" # Only log BLOCK actions by default
