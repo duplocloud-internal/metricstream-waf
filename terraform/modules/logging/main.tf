@@ -82,6 +82,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "waf_logs" {
     id     = "waf-logs-lifecycle"
     status = "Enabled"
 
+    filter {}
+
     transition {
       days          = 90
       storage_class = "GLACIER"

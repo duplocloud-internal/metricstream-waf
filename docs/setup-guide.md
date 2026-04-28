@@ -208,6 +208,7 @@ cat > /tmp/waf-deploy-policy.json << EOF
         "s3:GetBucketPolicy",
         "s3:GetBucketPolicyStatus",
         "s3:GetBucketPublicAccessBlock",
+        "s3:GetBucketTagging",
         "s3:GetBucketVersioning",
         "s3:GetLifecycleConfiguration",
         "s3:ListBucket",
@@ -215,6 +216,7 @@ cat > /tmp/waf-deploy-policy.json << EOF
         "s3:PutBucketObjectLockConfiguration",
         "s3:PutBucketPolicy",
         "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketTagging",
         "s3:PutBucketVersioning",
         "s3:PutLifecycleConfiguration",
         "s3:GetObject",
@@ -256,13 +258,21 @@ cat > /tmp/waf-deploy-policy.json << EOF
     },
 
     {
+      "Sid": "CloudWatchLogsDescribe",
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogGroups"
+      ],
+      "Resource": "*"
+    },
+
+    {
       "Sid": "CloudWatchLogsAccess",
       "Effect": "Allow",
       "Action": [
         "logs:CreateLogGroup",
         "logs:DeleteLogGroup",
         "logs:PutRetentionPolicy",
-        "logs:DescribeLogGroups",
         "logs:ListTagsLogGroup",
         "logs:ListTagsForResource",
         "logs:TagLogGroup",
